@@ -1,0 +1,640 @@
+---
+title: "Final Project"
+output: html_document
+---
+# Library load
+```{r}
+library(ggplot2)
+library(reshape2)
+library(fmsb)
+library(GGally)
+library(MVN)
+library(car)
+library(tidyr)
+library(biotools)
+library(psych)
+library(MASS)
+library(bestNormalize)
+library(lmtest)
+library(Hotelling)
+library(multcomp)
+library(dplyr)
+```
+# 데이터 전처리
+
+```{r}
+data <- read.csv('Speed Dating Data.csv')
+
+data <- data %>%
+  filter(wave < 6 | wave >9) # wave 6~9 제외
+
+# 제거할 Column
+drop_idx = c('id','idg','condtn','position','positin1','partner','pid',
+         'race_o','field','undergra','mn_sat','tuition','from','zipcode',
+         'income','career','career_c','exphappy','numdat_3','num_in_3')
+
+
+# 데이터 표준화
+data <- data %>%
+  mutate(sum1_1 = attr1_1 + sinc1_1 + intel1_1 + amb1_1 + shar1_1 + fun1_1,
+         sum2_1 = attr2_1 + sinc2_1 + intel2_1 + amb2_1 + shar2_1 + fun2_1,
+         sum1_2 = attr1_2 + sinc1_2 + intel1_2 + amb1_2 + shar1_2 + fun1_2,
+         sum2_2 = attr2_2 + sinc2_2 + intel2_2 + amb2_2 + shar2_2 + fun2_2,
+         sum1_3 = attr1_3 + sinc1_3 + intel1_3 + amb1_3 + shar1_3 + fun1_3,
+         sum2_3 = attr2_3 + sinc2_3 + intel2_3 + amb2_3 + shar2_3 + fun2_3) %>%
+  mutate(across(c(attr1_1, sinc1_1, intel1_1, amb1_1, shar1_1, fun1_1), ~ (.x / sum1_1) * 100)) %>%
+  mutate(across(c(attr2_1, sinc2_1, intel2_1, amb2_1, shar2_1, fun2_1), ~ (.x / sum2_1) * 100)) %>%
+  mutate(across(c(attr1_2, sinc1_2, intel1_2, amb1_2, shar1_2, fun1_2), ~ (.x / sum1_2) * 100)) %>%
+  mutate(across(c(attr2_2, sinc2_2, intel2_2, amb2_2, shar2_2, fun2_2), ~ (.x / sum2_2) * 100)) %>%
+  mutate(across(c(attr1_3, sinc1_3, intel1_3, amb1_3, shar1_3, fun1_3), ~ (.x / sum1_3) * 100)) %>%
+  mutate(across(c(attr2_3, sinc2_3, intel2_3, amb2_3, shar2_3, fun2_3), ~ (.x / sum2_3) * 100)) 
+
+
+data$gender <- as.factor(data$gender)
+data$samerace <- as.factor(data$samerace)
+data$race <- as.factor(data$race)
+data$dec <- as.factor(data$dec)
+
+## scorecard, partner index
+score_idx <- c('dec','attr','sinc','intel','fun','amb','shar',
+               'like','prob')
+
+partner_idx <- c('met','order','match','int_corr',
+                 'samerace','age_o','pf_o_att','pf_o_sin',
+                 'pf_o_int', 'pf_o_fun','pf_o_amb','pf_o_sha',
+                 'dec_o','attr_o','sinc_o','intel_o',
+                 'fun_o','amb_o','shar_o','like_o','prob_o','met_o')
+
+drop_data <- data %>% dplyr::select(-all_of(drop_idx))
+temp_data <- drop_data %>% dplyr::select(-all_of(c(score_idx, partner_idx)))
+```
+
+## 사람별 데이터 제작
+
+```{r}
+data_iid <- temp_data %>% 
+  distinct(iid, .keep_all=TRUE)   #iid=118 이 없음.
+# 변수 aggregation
+data_aggregate <- data %>%
+  group_by(iid) %>%
+  summarise(num_match = sum(match == 1),
+            num_dec = sum(dec == 1), 
+            num_par_dec = sum(dec_o == 1),
+            total_rounds = first(round),
+            mean_int_corr = mean(int_corr, na.rm = T),
+            mean_attr_o = mean(attr_o, na.rm = T),
+            mean_sinc_o = mean(sinc_o, na.rm = T),
+            mean_intel_o = mean(intel_o, na.rm = T),
+            mean_fun_o = mean(fun_o, na.rm = T),
+            mean_amb_o = mean(amb_o, na.rm = T),
+            mean_shar_o = mean(shar_o, na.rm = T),
+            mean_attr = mean(attr, na.rm = T),
+            mean_sinc = mean(sinc, na.rm = T),
+            mean_intel = mean(intel, na.rm = T),
+            mean_fun = mean(fun, na.rm = T),
+            mean_amb = mean(amb, na.rm = T),
+            mean_shar = mean(shar, na.rm = T),
+            mean_like = mean(like, na.rm = T),
+            mean_prob = mean(prob, na.rm = T))%>%
+  mutate(match = ifelse(num_match > 0, 1, 0)) %>%
+  mutate(per_dec = num_dec/total_rounds*100)%>%
+  mutate(per_par_dec=num_par_dec/total_rounds*100)%>%
+  mutate(per_match = num_match/total_rounds*100)
+
+
+# 개인별 데이터 생성
+personal_data <- merge(data_iid, data_aggregate, by='iid')
+```
+
+# 데이터 분석
+
+## Regression
+## 프로그램 참여 전후 중요하게 여기는 요소의 변화
+```{r}
+# Preparing the data
+data_features <- personal_data %>%
+  filter(!is.na(sum1_1), !is.na(sum2_1)) %>%
+  dplyr::select(iid, gender, attr1_1:shar2_1) %>%
+  distinct(iid, .keep_all = TRUE)
+
+data_features_after <- personal_data %>%
+  filter(!is.na(sum1_2), !is.na(sum2_2)) %>%
+  dplyr::select(iid, gender, attr1_2:shar2_2) %>%
+  distinct(iid, .keep_all = TRUE)
+
+data_features_after_2 <- personal_data %>%
+  filter(!is.na(sum1_3), !is.na(sum2_3)) %>%
+  dplyr::select(iid, gender, attr1_3:shar2_3) %>%
+  distinct(iid, .keep_all = TRUE)
+
+# Splitting data by gender
+men <- filter(data_features, gender == "1")
+women <- filter(data_features, gender == "0")
+men_after <- filter(data_features_after, gender == "1")
+women_after <- filter(data_features_after, gender == "0")
+men_after_2 <- filter(data_features_after_2, gender == "1")
+women_after_2 <- filter(data_features_after_2, gender == "0")
+
+# Setting up labels
+column_label <- c("Attractive", "Sincere", "Intelligent", "Fun", "Ambitious", "Shared Interests")
+row_label <- c("Self", "Others think")
+
+# Aggregating data
+radar_men <- data.frame(matrix(0, nrow = 2, ncol = 6, dimnames = list(row_label, column_label)))
+radar_men["Self", ] <- colMeans(men[, 3:8])
+radar_men["Others think", ] <- colMeans(women[, 15:20])
+
+radar_men = rbind(rep(40, 6) , rep(0, 6) , radar_men)
+radarchart(radar_men, pcol= c( rgb(0.2, 0.5, 0.5, 0.9), rgb(0.7, 0.5, 0.1, 0.9)), 
+           pfcol = c(rgb(0.2, 0.5, 0.5, 0.4), rgb(0.7, 0.5, 0.1, 0.4)),  
+           plwd = 3 , plty = 1, vlcex = 0.8, 
+           title = "Attributes males find most important in their female partner")
+legend(x = 1, y = 1.2, legend = c("Male perspective", "Female perspective"), 
+       bty = "n", pch = 20 , col = c(rgb(0.2, 0.5, 0.5, 0.4), rgb(0.7, 0.5, 0.1, 0.4)), 
+       text.col = "black", cex = 0.8, pt.cex = 2)
+
+radar_men_after <- data.frame(matrix(0, nrow = 2, ncol = 6, dimnames = list(row_label, column_label)))
+radar_men_after["Self", ] <- colMeans(men_after[, 3:8])
+radar_men_after["Others think", ] <- colMeans(women_after[, 15:20])
+
+radar_men_after = rbind(rep(40, 6) , rep(0, 6) , radar_men_after)
+radarchart(radar_men_after, pcol= c( rgb(0.2, 0.5, 0.5, 0.9), rgb(0.7, 0.5, 0.1, 0.9)), 
+           pfcol = c(rgb(0.2, 0.5, 0.5, 0.4), rgb(0.7, 0.5, 0.1, 0.4)),  
+           plwd = 3 , plty = 1, vlcex = 0.8, 
+           title = "Attributes males find most important in their female partner after speed dating")
+legend(x = 1, y = 1.2, legend = c("Male perspective", "Female perspective"), 
+       bty = "n", pch = 20 , col = c(rgb(0.2, 0.5, 0.5, 0.4), rgb(0.7, 0.5, 0.1, 0.4)), 
+       text.col = "black", cex = 0.8, pt.cex = 2)
+
+radar_men_after_2 <- data.frame(matrix(0, nrow = 2, ncol = 6, dimnames = list(row_label, column_label)))
+radar_men_after_2["Self", ] <- colMeans(men_after_2[, 3:8])
+radar_men_after_2["Others think", ] <- colMeans(women_after_2[, 15:20])
+
+radar_men_after_2 = rbind(rep(40, 6) , rep(0, 6) , radar_men_after_2)
+radarchart(radar_men_after_2, pcol= c( rgb(0.2, 0.5, 0.5, 0.9), rgb(0.7, 0.5, 0.1, 0.9)), 
+           pfcol = c(rgb(0.2, 0.5, 0.5, 0.4), rgb(0.7, 0.5, 0.1, 0.4)),  
+           plwd = 3 , plty = 1, vlcex = 0.8, 
+           title = "Attributes males find most important in their female partner after three weeks past speed dating")
+legend(x = 1, y = 1.2, legend = c("Male perspective", "Female perspective"), 
+       bty = "n", pch = 20 , col = c(rgb(0.2, 0.5, 0.5, 0.4), rgb(0.7, 0.5, 0.1, 0.4)), 
+       text.col = "black", cex = 0.8, pt.cex = 2)
+# For Women
+radar_women <- data.frame(matrix(0, nrow = 2, ncol = 6, dimnames = list(row_label, column_label)))
+radar_women["Self", ] <- colMeans(women[, 3:8])
+radar_women["Others think", ] <- colMeans(men[, 15:20])
+radar_women = rbind(rep(40, 6) , rep(0, 6) , radar_women)
+radarchart(radar_women, pcol= c( rgb(0.8, 0.2, 0.5, 0.9), rgb(0.7, 0.5, 0.1, 0.9)), 
+           pfcol = c(rgb(0.8, 0.2, 0.5, 0.4), rgb(0.7, 0.5, 0.1, 0.4)),  
+           plwd = 3 , plty = 1, vlcex = 0.8, 
+           title = "Attributes females find most important in their male partner")
+legend(x = 1, y = 1.2, legend = c("Female perspective", "Male perspective"), 
+       bty = "n", pch = 20 , col = c(rgb(0.8, 0.2, 0.5, 0.9), rgb(0.7, 0.5, 0.1, 0.9)), 
+       text.col = "black", cex = 0.8, pt.cex = 2)
+
+radar_women_after <- data.frame(matrix(0, nrow = 2, ncol = 6, dimnames = list(row_label, column_label)))
+radar_women_after["Self", ] <- colMeans(women_after[, 3:8])
+radar_women_after["Others think", ] <- colMeans(men_after[, 15:20])
+radar_women_after = rbind(rep(40, 6) , rep(0, 6) , radar_women_after)
+radarchart(radar_women_after, pcol= c( rgb(0.8, 0.2, 0.5, 0.9), rgb(0.7, 0.5, 0.1, 0.9)), 
+           pfcol = c(rgb(0.8, 0.2, 0.5, 0.4), rgb(0.7, 0.5, 0.1, 0.4)),  
+           plwd = 3 , plty = 1, vlcex = 0.8, 
+           title = "Attributes females find most important in their male partner after speed dating")
+legend(x = 1, y = 1.2, legend = c("Female perspective", "Male perspective"), 
+       bty = "n", pch = 20 , col = c(rgb(0.8, 0.2, 0.5, 0.9), rgb(0.7, 0.5, 0.1, 0.9)), 
+       text.col = "black", cex = 0.8, pt.cex = 2)
+
+radar_women_after_2 <- data.frame(matrix(0, nrow = 2, ncol = 6, dimnames = list(row_label, column_label)))
+radar_women_after_2["Self", ] <- colMeans(women_after_2[, 3:8])
+radar_women_after_2["Others think", ] <- colMeans(men_after_2[, 15:20])
+radar_women_after_2 = rbind(rep(40, 6) , rep(0, 6) , radar_women_after_2)
+radarchart(radar_women_after_2, pcol= c( rgb(0.8, 0.2, 0.5, 0.9), rgb(0.7, 0.5, 0.1, 0.9)), 
+           pfcol = c(rgb(0.8, 0.2, 0.5, 0.4), rgb(0.7, 0.5, 0.1, 0.4)),  
+           plwd = 3 , plty = 1, vlcex = 0.8, 
+           title = "Attributes females find most important in their male partner after three weeks past speed dating")
+legend(x = 1, y = 1.2, legend = c("Female perspective", "Male perspective"), 
+       bty = "n", pch = 20 , col = c(rgb(0.8, 0.2, 0.5, 0.9), rgb(0.7, 0.5, 0.1, 0.9)), 
+       text.col = "black", cex = 0.8, pt.cex = 2)
+```
+
+
+
+## Regression
+
+남녀간 평균이 유의미하게 다른가?
+```{r}
+# Assuming personal_data is your data frame
+genderdiff <- personal_data %>% 
+  select(per_par_dec, gender)
+
+# Run ANOVA
+leveneTest(per_par_dec ~ gender, data = genderdiff)
+
+anova_result <- aov(per_par_dec ~ gender, data = genderdiff)
+summary(anova_result)
+# Viewing means of per_par_dec for each gender
+gender_means <- genderdiff %>% 
+  group_by(gender) %>% 
+  summarise(mean_per_par_dec = mean(per_par_dec, na.rm = TRUE))
+
+print(gender_means)
+```
+
+## Reg
+```{r}
+# Selecting relevant columns and removing rows with missing data
+reg_data <- personal_data %>%
+  select(per_par_dec,per_match, attr1_1, sinc1_1, intel1_1, fun1_1, amb1_1, 
+         attr2_1, sinc2_1, intel2_1, fun2_1, amb2_1, field_cd,
+         attr3_1, sinc3_1, intel3_1, fun3_1, amb3_1, 
+         imprace, date, go_out, gender, age, 
+         goal, sports, tvsports, exercise, dining, museums, art, hiking, gaming, 
+         clubbing, reading, tv, theater, movies, concerts, music, shopping, yoga, 
+         match_es, mean_int_corr, mean_attr_o, mean_sinc_o, mean_intel_o, 
+         mean_fun_o, mean_amb_o, mean_shar_o,mean_like, mean_prob) %>%
+  na.omit()
+
+reg_data_w <- subset(reg_data, gender == 0)
+reg_data_m <- subset(reg_data, gender == 1)
+
+# Remove the gender variable
+reg_data_w$gender <- NULL
+reg_data_m$gender <- NULL
+
+# Fit the models
+lmfitw <- lm(cbind(per_par_dec,per_match) ~ ., data = reg_data_w)
+lmfitm <- lm(cbind(per_par_dec,per_match) ~ ., data = reg_data_m)
+summary(lmfitw)
+summary(lmfitm)
+library(car)
+Anova_w <- Anova(lmfitw)
+Anova_w
+vcov(lmfitw)
+Anova_m <- Anova(lmfitm)
+Anova_m
+
+
+# Reduced model for women
+lmfitw_reduced <- lm(cbind(per_par_dec,per_match) ~ intel2_1 + attr2_1+ intel3_1 + fun3_1 + amb3_1 +
+                     exercise + match_es + mean_attr_o+mean_fun_o+mean_prob, 
+                     data = reg_data_w)
+
+# Compare the full and reduced models
+# Reduced model for men
+lmfitm_reduced <- lm(cbind(per_par_dec,per_match) ~ gaming + movies + 
+                     match_es + mean_attr_o + mean_shar_o, 
+                     data = reg_data_m)
+
+# Compare the full and reduced models
+anova(lmfitm, lmfitm_reduced)
+anova(lmfitw, lmfitw_reduced)
+
+summary(lmfitw_reduced)
+summary(lmfitm_reduced)
+
+```
+```{r}
+predictionEllipse <- function(mod, newdata, level = 0.95, ggplot = TRUE){
+  # labels
+  lev_lbl <- paste0(level * 100, "%")
+  resps <- colnames(mod$coefficients)
+  title <- paste(lev_lbl, "confidence ellipse for", resps[1], "and", resps[2])
+  
+  # prediction
+  p <- predict(mod, newdata)
+  
+  # center of ellipse
+  cent <- c(p[1,1],p[1,2])
+  
+  # shape of ellipse
+  Z <- model.matrix(mod)
+  Y <- mod$model[[1]]
+  n <- nrow(Y)
+  m <- ncol(Y)
+  r <- ncol(Z) - 1
+  S <- crossprod(resid(mod))/(n-r-1)
+  
+  # radius of circle generating the ellipse
+  # see Johnson and Wichern (2007), p. 399
+  tt <- terms(mod)
+  Terms <- delete.response(tt)
+  mf <- model.frame(Terms, newdata, na.action = na.pass,
+                    xlev = mod$xlevels)
+  z0 <- model.matrix(Terms, mf, contrasts.arg = mod$contrasts)
+  rad <- sqrt((m*(n-r-1)/(n-r-m)) * qf(level,m,n-r-m) *
+                z0 %*% solve(t(Z)%*%Z) %*% t(z0))
+  
+  # generate ellipse using ellipse function in car package
+  ell_points <- car::ellipse(center = c(cent), shape = S,
+                             radius = c(rad), draw = FALSE)
+  
+  # ggplot2 plot
+  if(ggplot){
+    ell_points_df <- as.data.frame(ell_points)
+    ggplot2::ggplot(ell_points_df, ggplot2::aes(.data[["x"]], .data[["y"]])) +
+      ggplot2::geom_path() +
+      ggplot2::geom_point(ggplot2::aes(x = .data[[resps[1]]], 
+                                       y = .data[[resps[2]]]),
+                          data = data.frame(p)) +
+      ggplot2::labs(x = resps[1], y = resps[2],
+                    title = title)
+  } else {
+    # base R plot
+    plot(ell_points, type = "l",
+         xlab = resps[1], ylab = resps[2],
+         main = title)
+    points(x = cent[1], y = cent[2])
+  }
+}
+```
+
+```{r}
+lmfitw_reduced
+ndm <- data.frame(gaming = 8 , movies = 9, match_es = 1, mean_attr_o = 7, mean_shar_o = 2)
+ndw <- data.frame(intel2_1 = 5, attr2_1 = 5, intel3_1 = 5, fun3_1 = 5, amb3_1 = 5, exercise = 5, match_es = 5, mean_attr_o = 5, mean_fun_o = 5, mean_prob = 5)
+predictionEllipse(lmfitw_reduced, ndw, level = 0.95, ggplot = TRUE)
+predictionEllipse(lmfitm_reduced, ndm, level = 0.95, ggplot = TRUE)
+
+```
+## Gap 분석
+
+### 성별간 차이
+```{r}
+# Step 1: Extract relevant columns
+self_perception <- dplyr::select(personal_data, ends_with("3_1"))
+self_perception2 <- dplyr::select(personal_data, ends_with("3_2"))
+external_perception <- dplyr::select(personal_data, ends_with("_o"))[,-6]
+gender <- personal_data$gender
+match <- personal_data$match
+# Ensure the data is aligned correctly
+
+perception_test <- cbind(self_perception, self_perception2, gender)
+
+# Step 2: Calculate the differences
+gap <- self_perception - external_perception
+gap_with_gender <- cbind(gap, gender = gender)
+names(gap) <- c("attr_gap", "sinc_gap", "intel_gap", "fun_gap", "amb_gap")
+combined_data <- cbind(self_perception, external_perception, gap, gender)
+perception_test <- na.omit(perception_test)
+dec <- personal_data$per_par_dec
+dec2 <- personal_data$per_dec
+combined_data_reg <- cbind(gap, gender, dec, match, dec2)
+
+# Na omit
+gap <- na.omit(gap)
+combined_data <- na.omit(combined_data)
+gap_with_gender <- na.omit(gap_with_gender)
+combined_data_reg <- na.omit(combined_data_reg)
+male_data <- subset(combined_data, gender == "1")   
+female_data <- subset(combined_data, gender == "0") 
+male_data <- male_data[, -ncol(male_data)]
+female_data <- female_data[, -ncol(female_data)]
+
+
+# Create a scatter plot matrix
+ggpairs(gap_with_gender, 
+        aes(color = gender), 
+        lower = list(continuous = wrap("points", size = 0.5, alpha = 0.5)),
+        diag = list(continuous = wrap("densityDiag", alpha = 0.5)))
+
+```
+
+## 전반적인 남여 객관적/주관적 평가
+```{r}
+combined_means <- personal_data %>%
+  mutate(mean_self = rowMeans(dplyr::select(., ends_with("3_1")), na.rm = TRUE),
+         mean_ext = rowMeans(dplyr::select(., ends_with("_o"))[,-6], na.rm = TRUE)) %>%
+  dplyr::select(mean_self, mean_ext, gender, go_out, date, iid)
+# Step 3: Create scatter plots
+ggplot(combined_means, aes(x = mean_self, y = mean_ext, color = gender)) +
+  geom_point(alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Average Self vs. External Perceptions by Gender",
+       x = "Average Self Perception",
+       y = "Average External Perception") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "black") +
+  facet_wrap(~gender) +
+  scale_color_manual(values = c("1" = "blue", "0" = "red")) 
+```
+
+```{r}
+
+# Step 2: Calculate the differences
+gap2 <- self_perception2 - external_perception
+gap_with_gender2 <- cbind(gap2, gender = gender)
+names(gap2) <- c("attr_gap", "sinc_gap", "intel_gap", "fun_gap", "amb_gap")
+combined_data2 <- cbind(self_perception2, external_perception, gap2, gender)
+combined_data_reg2 <- cbind(gap2, gender, dec, match, dec2)
+
+# Na omit
+gap2 <- na.omit(gap2)
+combined_data2 <- na.omit(combined_data2)
+gap_with_gender2 <- na.omit(gap_with_gender2)
+combined_data_reg2 <- na.omit(combined_data_reg2)
+male_data2 <- subset(combined_data2, gender == "1")   
+female_data2 <- subset(combined_data2, gender == "0") 
+male_data2 <- male_data2[, -ncol(male_data2)]
+female_data2 <- female_data2[, -ncol(female_data2)]
+
+
+# Create a scatter plot matrix
+ggpairs(gap_with_gender2, 
+        aes(color = gender), 
+        lower = list(continuous = wrap("points", size = 0.5, alpha = 0.5)),
+        diag = list(continuous = wrap("densityDiag", alpha = 0.5)))
+```
+
+```{r}
+combined_means2 <- personal_data %>%
+  mutate(mean_self2 = rowMeans(dplyr::select(., ends_with("3_2")), na.rm = TRUE),
+         mean_ext2 = rowMeans(dplyr::select(., ends_with("_o"))[,-6], na.rm = TRUE)) %>%
+  dplyr::select(mean_self2, mean_ext2, gender, go_out, date, iid)
+# Step 3: Create scatter plots
+ggplot(combined_means2, aes(x = mean_self2, y = mean_ext2, color = gender)) +
+  geom_point(alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Average Self vs. External Perceptions by Gender after dating",
+       x = "Average Self Perception",
+       y = "Average External Perception") +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "black") +
+  facet_wrap(~gender) +
+  scale_color_manual(values = c("1" = "blue", "0" = "red")) 
+```
+
+
+
+```{r}
+# Assuming 'iid' is the unique identifier in both datasets
+merged_data <- merge(combined_means, combined_means2, by = "iid")
+# Remove rows with NAs
+merged_data <- na.omit(merged_data)
+# Calculate differences
+merged_data$diff_self <- merged_data$mean_self2 - merged_data$mean_self
+# Paired t-test for self-rating
+t_test_self <- t.test(merged_data$mean_self2, merged_data$mean_self, mu = 0, paired = TRUE)
+
+# Paired t-test for external rating
+# Print results
+print(t_test_self)
+```
+
+
+### MANOVA
+```{r}
+# Assumption Check
+
+## Multivariate normality
+data_male <- combined_data[combined_data$gender == "1", c("attr_gap", "sinc_gap", "intel_gap", "fun_gap", "amb_gap")]
+data_female <- combined_data[combined_data$gender == "0", c("attr_gap", "sinc_gap", "intel_gap", "fun_gap", "amb_gap")]
+data_male_shifted <- data_male
+data_female_shifted <- data_female
+
+# Apply the Yeo-Johnson transformation to each column
+for (col in names(data_male_shifted)) {
+    # The Yeo-Johnson transformation function in the 'car' package
+    yj_trans <- yeojohnson(data_male_shifted[,col])
+  
+    # The actual transformed data is stored in the 'yj_trans$yj' component
+    data_male_shifted[,col] <- yj_trans$x.t
+}
+
+# Apply the Yeo-Johnson transformation to each column
+for (col in names(data_female_shifted)) {
+    # The Yeo-Johnson transformation function in the 'car' package
+    yj_trans <- yeojohnson(data_female_shifted[,col])
+  
+    # The actual transformed data is stored in the 'yj_trans$yj' component
+    data_female_shifted[,col] <- yj_trans$x.t
+}
+
+
+test<-mardia(data_male_shifted)
+testf <- mardia(data_female_shifted)
+mardia_test_male <- mardia(data_male)
+mardia_test_female <- mardia(data_female)
+mvn(data_male)
+mvn(data_female)
+mvn(data_male_shifted)
+mvn(data_female_shifted)
+
+## Homogeneity of variances
+levene_attr_gap <- leveneTest(attr_gap ~ gender, data = combined_data)
+levene_sinc_gap <- leveneTest(sinc_gap ~ gender, data = combined_data)
+levene_intel_gap <- leveneTest(intel_gap ~ gender, data = combined_data)
+levene_fun_gap <- leveneTest(fun_gap ~ gender, data = combined_data)
+levene_amb_gap <- leveneTest(amb_gap ~ gender, data = combined_data)
+
+# Combine the results into a list for easier viewing
+levene_tests <- list(
+  attr_gap = levene_attr_gap,
+  sinc_gap = levene_sinc_gap,
+  intel_gap = levene_intel_gap,
+  fun_gap = levene_fun_gap,
+  amb_gap = levene_amb_gap
+)
+levene_tests
+
+## Homogeniety of Covariance Matrices
+
+box_m_result <- boxM(gap, grouping = gap_with_gender$gender)
+box_m_result
+
+## Multicolinearity
+cor_matrix <- cor(combined_data[, c("attr_gap", "sinc_gap", "intel_gap", "fun_gap", "amb_gap")])
+cor_matrix
+
+## MANOVA
+# Perform MANOVA
+manova_results <- manova(cbind(attr_gap, sinc_gap, intel_gap, fun_gap, amb_gap) ~ gender, data = combined_data)
+
+# Get a summary of the MANOVA results
+summary(manova_results)
+
+# Get a summary of the MANOVA results with Pillai's trace
+summary(manova_results, test = "Pillai")
+
+# Univariate ANOVAs for each dependent variable
+anova_attr <- aov(attr_gap ~ gender, data = combined_data)
+anova_sinc <- aov(sinc_gap ~ gender, data = combined_data)
+anova_intel <- aov(intel_gap ~ gender, data = combined_data)
+anova_fun <- aov(fun_gap ~ gender, data = combined_data)
+anova_amb <- aov(amb_gap ~ gender, data = combined_data)
+
+# Check the summary for each ANOVA
+summary(anova_attr)
+summary(anova_sinc)
+summary(anova_intel)
+summary(anova_fun)
+summary(anova_amb)
+
+
+
+calculate_ci_for_all_attributes <- function(data, attributes, group_var, num_comparisons) {
+  results <- list()
+
+  for (attr in attributes) {
+    mean_diff <- mean(data[[attr]][data[[group_var]] == '0']) - mean(data[[attr]][data[[group_var]] == '1'])
+    sd1 <- sd(data[[attr]][data[[group_var]] == '0'])
+    sd2 <- sd(data[[attr]][data[[group_var]] == '1'])
+    n1 <- sum(data[[group_var]] == '0')
+    n2 <- sum(data[[group_var]] == '1')
+
+    # Adjusted alpha level (for Bonferroni)
+    alpha_adj <- 0.05 / num_comparisons
+
+    # Degrees of freedom
+    df <- n1 + n2 - 2
+
+    # Critical t-value
+    t_crit <- qt(1 - alpha_adj / 2, df)
+
+    # Standard error of the difference
+    se_diff <- sqrt(sd1^2 / n1 + sd2^2 / n2)
+
+    # Confidence interval
+    ci_lower <- mean_diff - t_crit * se_diff
+    ci_upper <- mean_diff + t_crit * se_diff
+
+    # Store results
+    results[[attr]] <- c(lower = ci_lower, upper = ci_upper)
+  }
+
+  return(results)
+}
+attributes <- c("attr_gap", "sinc_gap", "intel_gap", "fun_gap", "amb_gap")
+ci_results <- calculate_ci_for_all_attributes(combined_data, attributes, "gender", length(attributes))
+
+# Output the results
+ci_results
+
+
+
+
+
+# 평균적으로 외모와 유머러스함에 대해서는 남자들이 자신을 여자들에 비해 과대평가하는 경향이 있다
+# 평균적으로 여자들이 남자들에 비해 자신의 지능을 과대평가하는 경향이 있다
+
+## Regression
+
+
+fit <- lm(cbind(dec2,match)~.-match-dec-dec2,data = combined_data_reg)
+summary(fit)
+fit2 <- lm(dec~.-match-dec2, data = combined_data_reg)
+summary(fit2)
+d<-subset(combined_data_reg, gender ==1)
+d$gender <- NULL
+d2 <- subset(combined_data_reg, gender ==0)
+d2$gender <- NULL
+d
+matchfitm <- lm(cbind(dec,match)~.-dec2, data = d)
+matchfitw <- lm(cbind(dec,match)~.-dec2, data = d2)
+Anova(matchfitm)
+Anova(matchfitw)
+reduced_matchfitm <- lm(cbind(dec,match)~.-dec2-amb_gap-sinc_gap, data = d)
+reduced_matchfitw <- lm(cbind(dec,match)~.-dec2-intel_gap-sinc_gap, data = d2)
+anova(reduced_matchfitm, matchfitm)
+anova(reduced_matchfitw, matchfitw)
+summary(reduced_matchfitm)
+summary(reduced_matchfitw)
+fit3 <- glm(match ~ .-dec-dec2, data = combined_data_reg, family = 'binomial')
+summary(fit3)
+```
